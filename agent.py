@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
+
 import os
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_astradb import AstraDBVectorStore
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
@@ -27,30 +27,18 @@ if missing:
 
 
 # ==============================
-# 2️⃣ EMBEDDING MODEL
-# ==============================
-
-embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
-
-
-# ==============================
-# 3️⃣ ASTRA VECTOR STORES
+# 2️⃣ ASTRA VECTOR STORES (NO LOCAL EMBEDDINGS)
 # ==============================
 
 vector_store_books = AstraDBVectorStore(
-    embedding=embedding_model,
     collection_name="mp_shashi_tharoor_books_v1"
 )
 
 vector_store_parliament = AstraDBVectorStore(
-    embedding=embedding_model,
     collection_name="mp_shashi_tharoor_parliament_v1"
 )
 
 vector_store_profile = AstraDBVectorStore(
-    embedding=embedding_model,
     collection_name="mp_shashi_tharoor_profile_v1"
 )
 
@@ -60,7 +48,7 @@ retriever_profile = vector_store_profile.as_retriever(search_kwargs={"k": 4})
 
 
 # ==============================
-# 4️⃣ LLM (GROQ)
+# 3️⃣ LLM (GROQ)
 # ==============================
 
 llm = ChatGroq(
@@ -70,7 +58,7 @@ llm = ChatGroq(
 
 
 # ==============================
-# 5️⃣ ROUTER PROMPT
+# 4️⃣ ROUTER PROMPT
 # ==============================
 
 router_prompt = ChatPromptTemplate.from_template("""
@@ -91,7 +79,7 @@ router_chain = router_prompt | llm | StrOutputParser()
 
 
 # ==============================
-# 6️⃣ QUERY REWRITER
+# 5️⃣ QUERY REWRITER
 # ==============================
 
 rewrite_prompt = ChatPromptTemplate.from_template("""
@@ -108,7 +96,7 @@ rewrite_chain = rewrite_prompt | llm | StrOutputParser()
 
 
 # ==============================
-# 7️⃣ ANSWER PROMPT
+# 6️⃣ ANSWER PROMPT
 # ==============================
 
 answer_prompt = ChatPromptTemplate.from_template("""
@@ -127,7 +115,7 @@ Question:
 
 
 # ==============================
-# 8️⃣ MAIN FUNCTION
+# 7️⃣ MAIN FUNCTION
 # ==============================
 
 def ask_agent(question: str) -> str:
@@ -154,10 +142,12 @@ def ask_agent(question: str) -> str:
         docs = retriever_parliament.invoke(optimized_query)
 
     elif route == "both":
-        docs = retriever_books.invoke(optimized_query) + \
-               retriever_parliament.invoke(optimized_query)
+        docs = (
+            retriever_books.invoke(optimized_query)
+            + retriever_parliament.invoke(optimized_query)
+        )
 
-    else:
+    else:  # "all"
         docs = (
             retriever_profile.invoke(optimized_query)
             + retriever_books.invoke(optimized_query)
@@ -167,7 +157,6 @@ def ask_agent(question: str) -> str:
     if not docs:
         return "No documents retrieved."
 
-    # Limit results
     docs = docs[:10]
 
     context = "\n\n".join(
