@@ -2,153 +2,119 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
-
 from langchain_astradb import AstraDBVectorStore
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-
 # ==========================================
-# 1️⃣ REQUIRED ENV VARIABLES CHECK
+# 1️⃣ ENV CHECK
 # ==========================================
-
-REQUIRED_ENV = [
-    "GROQ_API_KEY",
-    "ASTRA_DB_APPLICATION_TOKEN",
-    "ASTRA_DB_API_ENDPOINT",
-]
-
+REQUIRED_ENV = ["GROQ_API_KEY", "ASTRA_DB_APPLICATION_TOKEN", "ASTRA_DB_API_ENDPOINT"]
 missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
 if missing:
-    raise RuntimeError(
-        f"Missing environment variables: {missing}\n"
-        f"Set them in Render Environment settings."
-    )
+    raise RuntimeError(f"Missing environment variables: {missing}")
 
 
 # ==========================================
-# 2️⃣ EMBEDDING MODEL
+# 2️⃣ EMBEDDING — loaded ONCE at startup
 # ==========================================
-
+print("Loading embedding model...")
 embedding = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"normalize_embeddings": True, "batch_size": 32},
 )
+print("Embedding model ready.")
 
 
 # ==========================================
-# 3️⃣ ASTRA VECTOR STORES
-# ✅ FIX: Use the SAME collection names as in your notebook
+# 3️⃣ VECTOR STORES
 # ==========================================
-
-vector_store_books = AstraDBVectorStore(
-    collection_name="books_collection",
+_astra_kwargs = dict(
     embedding=embedding,
     api_endpoint=os.environ["ASTRA_DB_API_ENDPOINT"],
     token=os.environ["ASTRA_DB_APPLICATION_TOKEN"],
 )
 
-vector_store_parliament = AstraDBVectorStore(
-    collection_name="parliament_clean_v1",
-    embedding=embedding,
-    api_endpoint=os.environ["ASTRA_DB_API_ENDPOINT"],
-    token=os.environ["ASTRA_DB_APPLICATION_TOKEN"],
-)
+vector_store_books      = AstraDBVectorStore(collection_name="books_collection",    **_astra_kwargs)
+vector_store_parliament = AstraDBVectorStore(collection_name="parliament_clean_v1", **_astra_kwargs)
+vector_store_profile    = AstraDBVectorStore(collection_name="profile_clean_v1",    **_astra_kwargs)
 
-vector_store_profile = AstraDBVectorStore(
-    collection_name="profile_clean_v1",
-    embedding=embedding,
-    api_endpoint=os.environ["ASTRA_DB_API_ENDPOINT"],
-    token=os.environ["ASTRA_DB_APPLICATION_TOKEN"],
-)
+retriever_books      = vector_store_books.as_retriever(search_kwargs={"k": 6})
+retriever_parliament = vector_store_parliament.as_retriever(search_kwargs={"k": 5})
+retriever_profile    = vector_store_profile.as_retriever(search_kwargs={"k": 3})
 
-retriever_books = vector_store_books.as_retriever(search_kwargs={"k": 8})
-retriever_parliament = vector_store_parliament.as_retriever(search_kwargs={"k": 6})
-retriever_profile = vector_store_profile.as_retriever(search_kwargs={"k": 4})
+print("AstraDB connected.")
 
 
 # ==========================================
 # 4️⃣ LLM
 # ==========================================
-
 llm = ChatGroq(
     model_name="llama-3.1-8b-instant",
-    temperature=0
+    temperature=0,
+    max_tokens=512,
 )
 
 
 # ==========================================
-# 5️⃣ ROUTER — decides which collection(s) to search
-# ✅ FIX: Added back from notebook
+# 5️⃣ PROMPT — always attributes answers to Tharoor
 # ==========================================
-
-router_prompt = ChatPromptTemplate.from_template("""
-Decide which source should answer the question.
-Respond with ONLY one word:
-
-profile
-books
-parliament
-both
-all
-
-Question:
-{question}
-""")
-
-router_chain = router_prompt | llm | StrOutputParser()
-
-
-# ==========================================
-# 6️⃣ QUERY REWRITER — converts question to search keywords
-# ✅ FIX: Added back from notebook
-# ==========================================
-
-rewrite_prompt = ChatPromptTemplate.from_template("""
-Convert the question into only keywords.
-No quotes.
-No explanation.
-Return only keywords separated by spaces.
-
-Question:
-{question}
-""")
-
-rewrite_chain = rewrite_prompt | llm | StrOutputParser()
-
-
-# ==========================================
-# 7️⃣ ANSWER PROMPT — more flexible, same as final notebook version
-# ✅ FIX: Less strict, won't wrongly say "Not available"
-# ==========================================
-
 answer_prompt = ChatPromptTemplate.from_template("""
-You are a political research assistant.
+You are a research assistant specializing in Shashi Tharoor — Indian politician, author, and diplomat.
 
-Task:
-- Answer the question using ONLY the context.
-- If the context includes a definition or explanation, summarize it clearly in 3–6 lines.
-- If the context is about the topic but doesn't define it directly, explain what the context implies.
-- Only say "Not available in indexed data." if the context is truly unrelated.
+STRICT RULES:
+- This assistant is ONLY about Shashi Tharoor. Always answer from HIS perspective.
+- If the context contains quotes from OTHER people (Churchill, Modi, etc.), do NOT present those as Tharoor's views.
+  Instead, you may say "Tharoor referenced [person] who said..." if relevant.
+- Answer using ONLY the provided context.
+- Be concise: 3-5 lines max.
+- If "he", "his", "him" appears in the question, it always refers to Shashi Tharoor.
+- Only say "Not available in indexed data." if context is truly unrelated to the question.
 
-Write in simple, direct English.
+Recent conversation (for context):
+{history}
 
-Context:
+Context from knowledge base:
 {context}
 
-Question:
-{question}
+Question: {question}
 """)
 
+chain = answer_prompt | llm | StrOutputParser()
+
 
 # ==========================================
-# 8️⃣ HELPER — deduplicate while keeping order
+# 6️⃣ KEYWORD ROUTER — instant, no LLM call
 # ==========================================
+PROFILE_KEYWORDS = [
+    "born", "birth", "family", "wife", "married", "children", "education",
+    "school", "college", "early life", "career", "age", "personal", "son",
+    "daughter", "mother", "father", "profile", "biography", "life"
+]
 
-def _dedupe_keep_order(docs):
-    seen = set()
-    out = []
+PARLIAMENT_KEYWORDS = [
+    "parliament", "speech", "debate", "lok sabha", "mp", "member",
+    "constituency", "thiruvananthapuram", "vote", "bill", "session",
+    "minister", "government", "policy", "question hour"
+]
+
+def smart_route(question: str) -> str:
+    q = question.lower()
+    if any(kw in q for kw in PROFILE_KEYWORDS):
+        return "profile"
+    if any(kw in q for kw in PARLIAMENT_KEYWORDS):
+        return "parliament"
+    return "books"
+
+
+# ==========================================
+# 7️⃣ DEDUPLICATE
+# ==========================================
+def _dedupe(docs):
+    seen, out = set(), []
     for d in docs:
         if d.page_content not in seen:
             seen.add(d.page_content)
@@ -157,61 +123,43 @@ def _dedupe_keep_order(docs):
 
 
 # ==========================================
-# 9️⃣ MAIN AGENT FUNCTION
+# 8️⃣ MAIN AGENT — accepts optional history
 # ==========================================
-
-def ask_agent(question: str) -> str:
-
+def ask_agent(question: str, history: list = None) -> str:
     if not question or not question.strip():
         return "Please provide a question."
 
     question = question.strip()
 
-    # 🔎 Route to the right collection(s)
-    route = router_chain.invoke({"question": question}).strip().lower()
-    print("Route:", route)
+    # Build history string for prompt
+    history_str = ""
+    if history:
+        for turn in history[-4:]:   # last 4 turns max
+            role = "User" if turn["role"] == "user" else "Assistant"
+            history_str += f"{role}: {turn['text']}\n"
 
-    # 🔎 Rewrite question into search keywords
-    optimized_query = rewrite_chain.invoke({"question": question}).strip()
-    print("Query:", optimized_query)
+    route = smart_route(question)
+    print(f"Route: {route} | Q: {question[:60]}")
 
-    # 🔎 Retrieve from the appropriate collection(s)
     if route == "profile":
-        docs = retriever_profile.invoke(optimized_query)
-
-    elif route == "books":
-        docs = retriever_books.invoke(optimized_query)
-
+        docs = retriever_profile.invoke(question)
+        if len(docs) < 2:
+            docs += retriever_books.invoke(question)[:4]
     elif route == "parliament":
-        docs = retriever_parliament.invoke(optimized_query)
-
-    elif route == "both":
-        docs = (retriever_books.invoke(optimized_query)
-                + retriever_parliament.invoke(optimized_query))
-
-    else:  # all
-        docs = (retriever_profile.invoke(optimized_query)
-                + retriever_books.invoke(optimized_query)
-                + retriever_parliament.invoke(optimized_query))
+        docs = retriever_parliament.invoke(question)
+    else:
+        docs = retriever_books.invoke(question)
+        if len(docs) < 4:
+            docs += retriever_parliament.invoke(question)[:3]
 
     if not docs:
         return "No documents retrieved."
 
-    # 🧹 Deduplicate but keep order
-    docs = _dedupe_keep_order(docs)
-
-    # ✅ Keep only top chunks to avoid noise
-    docs = docs[:10]
-
-    # Build context with source info
-    context = "\n\n".join(
-        [f"[Source: {d.metadata.get('source_type', '')}, Book: {d.metadata.get('book_name', '')}, Page: {d.metadata.get('page', '')}]\n{d.page_content}"
-         for d in docs]
-    )
-
-    chain = answer_prompt | llm | StrOutputParser()
+    docs = _dedupe(docs)[:8]
+    context = "\n\n".join([d.page_content for d in docs])
 
     return chain.invoke({
         "context": context,
-        "question": question
+        "question": question,
+        "history": history_str or "No prior conversation."
     })
