@@ -2,15 +2,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+
 from langchain_astradb import AstraDBVectorStore
 from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 
-# ==============================
-# 1️⃣ CHECK REQUIRED ENV VARIABLES
-# ==============================
+# ==========================================
+# 1️⃣ REQUIRED ENV VARIABLES CHECK
+# ==========================================
 
 REQUIRED_ENV = [
     "GROQ_API_KEY",
@@ -22,34 +25,53 @@ missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
 if missing:
     raise RuntimeError(
         f"Missing environment variables: {missing}\n"
-        f"Set them before running server."
+        f"Set them in Render Environment settings."
     )
 
 
-# ==============================
-# 2️⃣ ASTRA VECTOR STORES (NO LOCAL EMBEDDINGS)
-# ==============================
+# ==========================================
+# 2️⃣ EMBEDDING MODEL (REQUIRED FOR ASTRA)
+# ==========================================
+
+embedding = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+
+# ==========================================
+# 3️⃣ ASTRA VECTOR STORES (UPDATED COLLECTIONS)
+# ==========================================
 
 vector_store_books = AstraDBVectorStore(
-    collection_name="mp_shashi_tharoor_books_v1"
+    collection_name="books_collection",
+    embedding=embedding,
+    api_endpoint=os.environ["ASTRA_DB_API_ENDPOINT"],
+    token=os.environ["ASTRA_DB_APPLICATION_TOKEN"],
 )
 
 vector_store_parliament = AstraDBVectorStore(
-    collection_name="mp_shashi_tharoor_parliament_v1"
+    collection_name="parliament_clean_v1",
+    embedding=embedding,
+    api_endpoint=os.environ["ASTRA_DB_API_ENDPOINT"],
+    token=os.environ["ASTRA_DB_APPLICATION_TOKEN"],
 )
 
 vector_store_profile = AstraDBVectorStore(
-    collection_name="mp_shashi_tharoor_profile_v1"
+    collection_name="profile_clean_v1",
+    embedding=embedding,
+    api_endpoint=os.environ["ASTRA_DB_API_ENDPOINT"],
+    token=os.environ["ASTRA_DB_APPLICATION_TOKEN"],
 )
 
-retriever_books = vector_store_books.as_retriever(search_kwargs={"k": 8})
+
+retriever_books = vector_store_books.as_retriever(search_kwargs={"k": 6})
 retriever_parliament = vector_store_parliament.as_retriever(search_kwargs={"k": 6})
 retriever_profile = vector_store_profile.as_retriever(search_kwargs={"k": 4})
 
 
-# ==============================
-# 3️⃣ LLM (GROQ)
-# ==============================
+# ==========================================
+# 4️⃣ LLM (GROQ - FAST & CHEAP)
+# ==========================================
 
 llm = ChatGroq(
     model_name="llama-3.1-8b-instant",
@@ -57,9 +79,9 @@ llm = ChatGroq(
 )
 
 
-# ==============================
-# 4️⃣ ROUTER PROMPT
-# ==============================
+# ==========================================
+# 5️⃣ ROUTER PROMPT
+# ==========================================
 
 router_prompt = ChatPromptTemplate.from_template("""
 Decide which source should answer the question.
@@ -78,9 +100,9 @@ Question:
 router_chain = router_prompt | llm | StrOutputParser()
 
 
-# ==============================
-# 5️⃣ QUERY REWRITER
-# ==============================
+# ==========================================
+# 6️⃣ QUERY REWRITER
+# ==========================================
 
 rewrite_prompt = ChatPromptTemplate.from_template("""
 Convert the question into only keywords.
@@ -95,9 +117,9 @@ Question:
 rewrite_chain = rewrite_prompt | llm | StrOutputParser()
 
 
-# ==============================
-# 6️⃣ ANSWER PROMPT
-# ==============================
+# ==========================================
+# 7️⃣ ANSWER PROMPT
+# ==========================================
 
 answer_prompt = ChatPromptTemplate.from_template("""
 You are a political research assistant.
@@ -114,9 +136,9 @@ Question:
 """)
 
 
-# ==============================
-# 7️⃣ MAIN FUNCTION
-# ==============================
+# ==========================================
+# 8️⃣ MAIN AGENT FUNCTION
+# ==========================================
 
 def ask_agent(question: str) -> str:
 
@@ -128,10 +150,10 @@ def ask_agent(question: str) -> str:
     # Step 1 — Route
     route = router_chain.invoke({"question": question}).strip().lower()
 
-    # Step 2 — Rewrite
+    # Step 2 — Rewrite Query for Better Retrieval
     optimized_query = rewrite_chain.invoke({"question": question}).strip()
 
-    # Step 3 — Retrieve
+    # Step 3 — Retrieve Based on Route
     if route == "profile":
         docs = retriever_profile.invoke(optimized_query)
 
