@@ -6,7 +6,6 @@ import os
 from langchain_astradb import AstraDBVectorStore
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
-
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -30,7 +29,7 @@ if missing:
 
 
 # ==========================================
-# 2️⃣ EMBEDDING MODEL (REQUIRED FOR ASTRA)
+# 2️⃣ EMBEDDING MODEL
 # ==========================================
 
 embedding = HuggingFaceEmbeddings(
@@ -39,7 +38,7 @@ embedding = HuggingFaceEmbeddings(
 
 
 # ==========================================
-# 3️⃣ ASTRA VECTOR STORES (UPDATED COLLECTIONS)
+# 3️⃣ ASTRA VECTOR STORES
 # ==========================================
 
 vector_store_books = AstraDBVectorStore(
@@ -64,13 +63,14 @@ vector_store_profile = AstraDBVectorStore(
 )
 
 
-retriever_books = vector_store_books.as_retriever(search_kwargs={"k": 6})
-retriever_parliament = vector_store_parliament.as_retriever(search_kwargs={"k": 6})
-retriever_profile = vector_store_profile.as_retriever(search_kwargs={"k": 4})
+# Stronger retrieval window
+retriever_books = vector_store_books.as_retriever(search_kwargs={"k": 12})
+retriever_parliament = vector_store_parliament.as_retriever(search_kwargs={"k": 10})
+retriever_profile = vector_store_profile.as_retriever(search_kwargs={"k": 6})
 
 
 # ==========================================
-# 4️⃣ LLM (GROQ - FAST & CHEAP)
+# 4️⃣ LLM
 # ==========================================
 
 llm = ChatGroq(
@@ -80,53 +80,21 @@ llm = ChatGroq(
 
 
 # ==========================================
-# 5️⃣ ROUTER PROMPT
-# ==========================================
-
-router_prompt = ChatPromptTemplate.from_template("""
-Decide which source should answer the question.
-Respond with ONLY one word:
-
-profile
-books
-parliament
-both
-all
-
-Question:
-{question}
-""")
-
-router_chain = router_prompt | llm | StrOutputParser()
-
-
-# ==========================================
-# 6️⃣ QUERY REWRITER
-# ==========================================
-
-rewrite_prompt = ChatPromptTemplate.from_template("""
-Convert the question into only keywords.
-No quotes.
-No explanation.
-Return only keywords separated by spaces.
-
-Question:
-{question}
-""")
-
-rewrite_chain = rewrite_prompt | llm | StrOutputParser()
-
-
-# ==========================================
-# 7️⃣ ANSWER PROMPT
+# 5️⃣ STRONG ANSWER PROMPT
 # ==========================================
 
 answer_prompt = ChatPromptTemplate.from_template("""
-You are a political research assistant.
+You are a strict political research assistant.
 
-- Answer using ONLY the provided context.
-- Be clear and concise (3–6 lines).
-- If unrelated, say: Not available in indexed data.
+IMPORTANT RULES:
+1. Answer ONLY using the provided context.
+2. If the answer is not clearly found in the context, respond exactly with:
+   Not available in indexed data.
+3. Do NOT use external knowledge.
+4. Do NOT guess.
+5. Do NOT hallucinate.
+
+Write in clear, professional language (3–6 lines).
 
 Context:
 {context}
@@ -137,7 +105,7 @@ Question:
 
 
 # ==========================================
-# 8️⃣ MAIN AGENT FUNCTION
+# 6️⃣ MAIN AGENT FUNCTION
 # ==========================================
 
 def ask_agent(question: str) -> str:
@@ -147,42 +115,30 @@ def ask_agent(question: str) -> str:
 
     question = question.strip()
 
-    # Step 1 — Route
-    route = router_chain.invoke({"question": question}).strip().lower()
-
-    # Step 2 — Rewrite Query for Better Retrieval
-    optimized_query = rewrite_chain.invoke({"question": question}).strip()
-
-    # Step 3 — Retrieve Based on Route
-    if route == "profile":
-        docs = retriever_profile.invoke(optimized_query)
-
-    elif route == "books":
-        docs = retriever_books.invoke(optimized_query)
-
-    elif route == "parliament":
-        docs = retriever_parliament.invoke(optimized_query)
-
-    elif route == "both":
-        docs = (
-            retriever_books.invoke(optimized_query)
-            + retriever_parliament.invoke(optimized_query)
-        )
-
-    else:  # "all"
-        docs = (
-            retriever_profile.invoke(optimized_query)
-            + retriever_books.invoke(optimized_query)
-            + retriever_parliament.invoke(optimized_query)
-        )
+    # 🔎 Retrieve from ALL collections (no router)
+    docs = (
+        retriever_profile.invoke(question)
+        + retriever_books.invoke(question)
+        + retriever_parliament.invoke(question)
+    )
 
     if not docs:
         return "No documents retrieved."
 
-    docs = docs[:10]
+    # 🧹 Deduplicate documents
+    seen = set()
+    unique_docs = []
+
+    for d in docs:
+        if d.page_content not in seen:
+            seen.add(d.page_content)
+            unique_docs.append(d)
+
+    # Limit context size
+    unique_docs = unique_docs[:12]
 
     context = "\n\n".join(
-        [doc.page_content for doc in docs]
+        [doc.page_content for doc in unique_docs]
     )
 
     chain = answer_prompt | llm | StrOutputParser()
