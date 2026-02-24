@@ -1,26 +1,29 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List, Optional
 
 from agent import ask_agent
 
 app = FastAPI(title="Tharoor Agent API")
 
-# Allow frontend to call backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Later restrict to your frontend domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Request model
+# ─── Models ───
+class HistoryTurn(BaseModel):
+    role: str   # "user" or "bot"
+    text: str
+
 class AskRequest(BaseModel):
     question: str
-    session_id: str | None = None
+    history: Optional[List[HistoryTurn]] = []
 
-# Response model
 class AskResponse(BaseModel):
     answer: str
 
@@ -32,5 +35,6 @@ def health():
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
-    answer = ask_agent(req.question)
+    history = [{"role": t.role, "text": t.text} for t in req.history] if req.history else []
+    answer = ask_agent(req.question, history=history)
     return {"answer": answer}
